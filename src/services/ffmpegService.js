@@ -77,7 +77,20 @@ async function createSegment(
   durationSeconds,
   label,
   isFocus,
+  timerStyle = "minimal",
 ) {
+  // Build drawtext filters based on style
+  let drawtextFilter = "";
+  const timerExpr = `%{eif\\:trunc((${durationSeconds}-t)/60)\\:d\\:2}\\:%{eif\\:mod(${durationSeconds}-t\\,60)\\:d\\:2}`;
+
+  if (timerStyle === "cozy") {
+    // Grouped label and timer with a simple dark translucent box
+    drawtextFilter = `drawtext=text='${label}':x=w-tw-50:y=50:fontsize=36:fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=15,drawtext=text='${timerExpr}':x=w-tw-50:y=110:fontsize=64:fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=15`;
+  } else {
+    // Minimal: clean text, no box
+    drawtextFilter = `drawtext=text='${label}':x=w-tw-50:y=50:fontsize=36:fontcolor=white,drawtext=text='${timerExpr}':x=w-tw-50:y=110:fontsize=64:fontcolor=white`;
+  }
+
   // Loop the normalized video to the target duration
   const args = [
     "-y",
@@ -88,7 +101,7 @@ async function createSegment(
     "-t",
     String(durationSeconds),
     "-vf",
-    `drawtext=text='${label}':x=w-tw-50:y=50:fontsize=48:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10`,
+    drawtextFilter,
     "-c:v",
     "libx264",
     "-preset",
@@ -119,7 +132,7 @@ async function concatSegments(segmentsListFile, outputPath) {
 }
 
 async function attachAudio(videoPath, audioPath, outputPath, durationSeconds) {
-  // Loop audio or trim audio to final duration
+  // Original attachAudio for fallback or backward compatibility
   const args = [
     "-y",
     "-i",
@@ -129,7 +142,7 @@ async function attachAudio(videoPath, audioPath, outputPath, durationSeconds) {
     "-i",
     audioPath,
     "-t",
-    String(durationSeconds), // Truncate to match video duration
+    String(durationSeconds),
     "-c:v",
     "copy",
     "-c:a",
@@ -147,10 +160,48 @@ async function attachAudio(videoPath, audioPath, outputPath, durationSeconds) {
   return outputPath;
 }
 
+async function attachAudioToSegment(
+  videoPath,
+  audioPath,
+  outputPath,
+  durationSeconds,
+) {
+  // Fade out needs to start `durationSeconds - 1`
+  const fadeOutStart = Math.max(0, durationSeconds - 1);
+  const args = [
+    "-y",
+    "-i",
+    videoPath,
+    "-stream_loop",
+    "-1",
+    "-i",
+    audioPath,
+    "-t",
+    String(durationSeconds),
+    "-c:v",
+    "copy",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-af",
+    `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1`,
+    "-map",
+    "0:v:0",
+    "-map",
+    "1:a:0",
+    "-shortest",
+    outputPath,
+  ];
+  await runCommand("ffmpeg", args);
+  return outputPath;
+}
+
 module.exports = {
   probeMedia,
   normalizeVideo,
   createSegment,
   concatSegments,
   attachAudio,
+  attachAudioToSegment,
 };

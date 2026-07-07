@@ -57,7 +57,7 @@ router.post("/:id/assets", upload.single("file"), async (req, res) => {
   }
 
   const { type } = req.body;
-  if (!["focus_video", "break_video", "audio", "thumbnail"].includes(type)) {
+  if (!["focus_video", "break_video", "audio", "break_audio", "thumbnail"].includes(type)) {
     fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: "Invalid asset type" });
   }

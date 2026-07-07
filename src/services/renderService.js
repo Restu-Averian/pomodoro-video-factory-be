@@ -31,6 +31,7 @@ async function executeRender(jobId) {
     const focusAsset = assets.find((a) => a.type === "focus_video");
     const breakAsset = assets.find((a) => a.type === "break_video");
     const audioAsset = assets.find((a) => a.type === "audio");
+    const breakAudioAsset = assets.find((a) => a.type === "break_audio");
 
     if (!focusAsset || !breakAsset || !audioAsset) {
       throw new Error("Missing required assets (focus, break, or audio)");
@@ -66,14 +67,26 @@ async function executeRender(jobId) {
 
     for (let i = 1; i <= sessionCount; i++) {
       // Focus
+      const focusSegVideoPath = path.join(tempDir, `focus-${i}-video.mp4`);
       const focusSegPath = path.join(tempDir, `focus-${i}.mp4`);
+
       await ffmpeg.createSegment(
         focusNormPath,
-        focusSegPath,
+        focusSegVideoPath,
         focusDurationSecs,
         `Focus ${i}/${sessionCount}`,
         true,
+        project.timer_style || "minimal",
       );
+
+      // Attach audio with fade
+      await ffmpeg.attachAudioToSegment(
+        focusSegVideoPath,
+        audioAsset.file_path,
+        focusSegPath,
+        focusDurationSecs,
+      );
+
       segmentFiles.push(focusSegPath);
       segmentsDone++;
       jobsRepo.updateJobStatus(
@@ -85,14 +98,30 @@ async function executeRender(jobId) {
 
       // Break
       if (i < sessionCount || includeFinalBreak) {
+        const breakSegVideoPath = path.join(tempDir, `break-${i}-video.mp4`);
         const breakSegPath = path.join(tempDir, `break-${i}.mp4`);
+
         await ffmpeg.createSegment(
           breakNormPath,
-          breakSegPath,
+          breakSegVideoPath,
           breakDurationSecs,
           `Break ${i}/${sessionCount}`,
           false,
+          project.timer_style || "minimal",
         );
+
+        const audioToUse = breakAudioAsset
+          ? breakAudioAsset.file_path
+          : audioAsset.file_path;
+
+        // Attach audio with fade
+        await ffmpeg.attachAudioToSegment(
+          breakSegVideoPath,
+          audioToUse,
+          breakSegPath,
+          breakDurationSecs,
+        );
+
         segmentFiles.push(breakSegPath);
         segmentsDone++;
         jobsRepo.updateJobStatus(
@@ -112,23 +141,13 @@ async function executeRender(jobId) {
       .join("\n");
     fs.writeFileSync(listPath, listContent);
 
-    const concatPath = path.join(tempDir, "concat-no-audio.mp4");
-    await ffmpeg.concatSegments(listPath, concatPath);
-
-    // Step 7: Audio
-    jobsRepo.updateJobStatus(jobId, "rendering", 95, "Attaching audio");
     const finalFilename = isPreview
       ? `preview-${Date.now()}.mp4`
       : `final-${Date.now()}.mp4`;
     const finalPath = path.join(outDir, finalFilename);
     const targetDuration = isPreview ? 30 : project.total_duration_seconds;
 
-    await ffmpeg.attachAudio(
-      concatPath,
-      audioAsset.file_path,
-      finalPath,
-      targetDuration,
-    );
+    await ffmpeg.concatSegments(listPath, finalPath);
 
     // Complete
     if (isPreview) {
