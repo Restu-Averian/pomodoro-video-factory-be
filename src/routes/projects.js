@@ -47,8 +47,40 @@ router.patch("/:id", (req, res) => {
 });
 
 router.delete("/:id", (req, res) => {
-  projectsRepo.deleteProject(req.params.id);
-  res.json({ success: true });
+  const { id } = req.params;
+  const project = projectsRepo.getProjectById(id);
+  if (!project) return res.status(404).json({ error: "Project not found" });
+
+  try {
+    // Note: YouTube video deletion is out of scope.
+    // If the project was uploaded to YouTube (has youtube_video_id in upload_jobs),
+    // we only delete the local database records and files here.
+    projectsRepo.deleteProject(id);
+
+    // Delete local files
+    const dirsToDelete = [
+      path.resolve(__dirname, `../../../data/uploads/${id}`),
+      path.resolve(__dirname, `../../../data/temp/${id}`),
+      path.resolve(__dirname, `../../../data/outputs/${id}`)
+    ];
+
+    let warnings = [];
+    dirsToDelete.forEach((dir) => {
+      if (fs.existsSync(dir)) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch (err) {
+          console.warn(`Failed to delete directory ${dir}:`, err);
+          warnings.push(`Could not fully delete ${path.basename(dir)} files`);
+        }
+      }
+    });
+
+    res.json({ success: true, warnings: warnings.length > 0 ? warnings : undefined });
+  } catch (err) {
+    console.error("Failed to delete project:", err);
+    res.status(500).json({ error: { message: "Failed to delete project" } });
+  }
 });
 
 router.post("/:id/assets", upload.single("file"), async (req, res) => {

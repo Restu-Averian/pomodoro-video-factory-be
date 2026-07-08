@@ -70,8 +70,13 @@ function updateProject(id, data) {
 }
 
 function deleteProject(id) {
-  const stmt = db.prepare('DELETE FROM projects WHERE id = ?');
-  stmt.run(id);
+  const transaction = db.transaction((projectId) => {
+    db.prepare('DELETE FROM upload_jobs WHERE project_id = ?').run(projectId);
+    db.prepare('DELETE FROM render_jobs WHERE project_id = ?').run(projectId);
+    db.prepare('DELETE FROM assets WHERE project_id = ?').run(projectId);
+    db.prepare('DELETE FROM projects WHERE id = ?').run(projectId);
+  });
+  transaction(id);
 }
 
 function duplicateProject(id) {
