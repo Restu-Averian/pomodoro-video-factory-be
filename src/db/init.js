@@ -57,6 +57,38 @@ function initDb() {
     );
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS youtube_accounts (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      channel_id TEXT,
+      access_token TEXT,
+      refresh_token TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS upload_jobs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      platform TEXT,
+      status TEXT,
+      youtube_video_id TEXT,
+      privacy_status TEXT,
+      scheduled_at DATETIME,
+      title TEXT,
+      description TEXT,
+      tags_json TEXT,
+      thumbnail_path TEXT,
+      error_message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (project_id) REFERENCES projects (id)
+    );
+  `);
+
   console.log('Database initialized successfully.');
 
   try {

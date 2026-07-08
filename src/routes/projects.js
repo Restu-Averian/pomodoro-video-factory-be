@@ -2,9 +2,12 @@ const express = require("express");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const { v4: uuidv4 } = require("uuid");
 const projectsRepo = require("../db/projectsRepo");
 const assetsRepo = require("../db/assetsRepo");
+const uploadJobsRepo = require("../db/uploadJobsRepo");
 const ffmpeg = require("../services/ffmpegService");
+const youtubeService = require("../services/youtubeService");
 
 const router = express.Router();
 
@@ -101,6 +104,51 @@ router.post("/:id/duplicate", (req, res) => {
   const project = projectsRepo.duplicateProject(req.params.id);
   if (!project) return res.status(404).json({ error: "Project not found" });
   res.status(201).json(project);
+});
+
+router.post("/:id/youtube/upload", (req, res) => {
+  const { id } = req.params;
+  const project = projectsRepo.getProjectById(id);
+  if (!project) return res.status(404).json({ error: "Project not found" });
+  if (project.status !== "completed") return res.status(400).json({ error: "Project render not completed" });
+  if (!fs.existsSync(project.output_path)) return res.status(400).json({ error: "Output video missing" });
+
+  const { title, description, tags, privacyStatus, scheduledAt, thumbnailPath } = req.body;
+
+  const jobId = uuidv4();
+  const job = {
+    id: jobId,
+    project_id: id,
+    platform: "youtube",
+    status: "queued",
+    privacy_status: privacyStatus || "private",
+    scheduled_at: scheduledAt || null,
+    title,
+    description,
+    tags_json: tags ? JSON.stringify(tags) : "[]",
+    thumbnail_path: thumbnailPath || null,
+  };
+
+  try {
+    uploadJobsRepo.createJob(job);
+    
+    // Start background upload
+    youtubeService.uploadVideo(jobId);
+
+    res.status(201).json({ id: jobId, status: "queued" });
+  } catch (error) {
+    console.error("Failed to queue upload:", error);
+    res.status(500).json({ error: { message: "Failed to queue upload" } });
+  }
+});
+
+router.get("/:id/upload-jobs", (req, res) => {
+  try {
+    const jobs = uploadJobsRepo.getJobsForProject(req.params.id);
+    res.json(jobs);
+  } catch (error) {
+    res.status(500).json({ error: { message: error.message } });
+  }
 });
 
 module.exports = router;
