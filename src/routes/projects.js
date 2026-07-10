@@ -61,7 +61,7 @@ router.delete("/:id", (req, res) => {
     const dirsToDelete = [
       path.resolve(__dirname, `../../../data/uploads/${id}`),
       path.resolve(__dirname, `../../../data/temp/${id}`),
-      path.resolve(__dirname, `../../../data/outputs/${id}`)
+      path.resolve(__dirname, `../../../data/outputs/${id}`),
     ];
 
     let warnings = [];
@@ -76,7 +76,10 @@ router.delete("/:id", (req, res) => {
       }
     });
 
-    res.json({ success: true, warnings: warnings.length > 0 ? warnings : undefined });
+    res.json({
+      success: true,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    });
   } catch (err) {
     console.error("Failed to delete project:", err);
     res.status(500).json({ error: { message: "Failed to delete project" } });
@@ -92,7 +95,15 @@ router.post("/:id/assets", upload.single("file"), async (req, res) => {
   }
 
   const { type } = req.body;
-  if (!["focus_video", "break_video", "audio", "break_audio", "thumbnail"].includes(type)) {
+  if (
+    ![
+      "focus_video",
+      "break_video",
+      "audio",
+      "break_audio",
+      "thumbnail",
+    ].includes(type)
+  ) {
     fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: "Invalid asset type" });
   }
@@ -141,11 +152,23 @@ router.post("/:id/duplicate", (req, res) => {
 router.post("/:id/youtube/upload", (req, res) => {
   const { id } = req.params;
   const project = projectsRepo.getProjectById(id);
-  if (!project) return res.status(404).json({ error: "Project not found" });
-  if (project.status !== "completed") return res.status(400).json({ error: "Project render not completed" });
-  if (!fs.existsSync(project.output_path)) return res.status(400).json({ error: "Output video missing" });
 
-  const { title, description, tags, privacyStatus, scheduledAt, thumbnailPath } = req.body;
+  if (!project) return res.status(404).json({ error: "Project not found" });
+  if (project.status !== "completed")
+    return res.status(400).json({ error: "Project render not completed" });
+
+  const absoluteOutputPath = path.resolve(__dirname, '../../../data', project.output_path.replace(/^\//, ''));
+  if (!fs.existsSync(absoluteOutputPath))
+    return res.status(400).json({ error: "Output video missing" });
+
+  const {
+    title,
+    description,
+    tags,
+    privacyStatus,
+    scheduledAt,
+    thumbnailPath,
+  } = req.body;
 
   const jobId = uuidv4();
   const job = {
@@ -163,7 +186,7 @@ router.post("/:id/youtube/upload", (req, res) => {
 
   try {
     uploadJobsRepo.createJob(job);
-    
+
     // Start background upload
     youtubeService.uploadVideo(jobId);
 

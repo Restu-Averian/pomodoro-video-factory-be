@@ -8,7 +8,7 @@ function saveAccount(account) {
       name = excluded.name,
       channel_id = excluded.channel_id,
       access_token = excluded.access_token,
-      refresh_token = excluded.refresh_token,
+      refresh_token = COALESCE(excluded.refresh_token, youtube_accounts.refresh_token),
       updated_at = CURRENT_TIMESTAMP
   `);
   stmt.run(
@@ -16,7 +16,7 @@ function saveAccount(account) {
     account.name,
     account.channel_id,
     account.access_token,
-    account.refresh_token
+    account.refresh_token || null
   );
 }
 
