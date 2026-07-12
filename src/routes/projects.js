@@ -415,4 +415,33 @@ router.get("/:id/upload-jobs", (req, res) => {
   }
 });
 
+const youtubeMetadataService = require("../services/youtubeMetadataService");
+
+router.post("/:id/youtube/metadata/generate", async (req, res) => {
+  const { id } = req.params;
+  const project = projectsRepo.getProjectById(id);
+
+  try {
+    const metadata = await youtubeMetadataService.generateMetadata(project, req.body.theme);
+    
+    // Save drafts
+    projectsRepo.updateProject(id, {
+      youtube_metadata_theme: metadata.theme,
+      youtube_title_draft: metadata.title,
+      youtube_description_draft: metadata.description,
+      youtube_metadata_generated_at: metadata.generatedAt,
+      youtube_metadata_source: metadata.source,
+    });
+    
+    res.json(metadata);
+  } catch (error) {
+    res.status(error.code === 'PROJECT_NOT_FOUND' ? 404 : 400).json({
+      error: {
+        code: error.code || "METADATA_GENERATION_FAILED",
+        message: error.message
+      }
+    });
+  }
+});
+
 module.exports = router;

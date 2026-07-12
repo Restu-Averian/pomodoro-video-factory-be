@@ -34,4 +34,15 @@ router.get("/ffmpeg/health", (req, res) => {
   });
 });
 
+const ollamaService = require("../services/ollamaService");
+
+router.get("/ai/ollama/health", async (req, res) => {
+  try {
+    const health = await ollamaService.checkHealth();
+    res.json(health);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;

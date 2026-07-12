@@ -95,6 +95,11 @@ function initDb() {
     rendered_duration_seconds: 'INTEGER',
     pomodoro_preset: "TEXT NOT NULL DEFAULT 'custom'",
     session_bell_asset_id: 'TEXT',
+    youtube_metadata_theme: 'TEXT',
+    youtube_title_draft: 'TEXT',
+    youtube_description_draft: 'TEXT',
+    youtube_metadata_generated_at: 'TEXT',
+    youtube_metadata_source: 'TEXT',
   })) {
     if (!columns.has(name)) db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${definition}`);
   }
