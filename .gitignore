@@ -128,3 +128,5 @@ dist
 # IDE specific files
 .vscode/
 .idea/
+
+.agents

@@ -77,19 +77,43 @@ async function createSegment(
   durationSeconds,
   label,
   isFocus,
-  timerStyle = "minimal",
+  timerTextColor = "0x7D6556",
 ) {
-  // Build drawtext filters based on style
-  let drawtextFilter = "";
+  // Helper to convert rgba(r,g,b,a) or #RRGGBB to FFmpeg format (0xRRGGBB)
+  const formatColorForFFmpeg = (color) => {
+    if (!color) return "0x7D6556";
+    const rgbaMatch = color.match(
+      /rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?\\)/,
+    );
+    if (rgbaMatch) {
+      const r = parseInt(rgbaMatch[1]).toString(16).padStart(2, "0");
+      const g = parseInt(rgbaMatch[2]).toString(16).padStart(2, "0");
+      const b = parseInt(rgbaMatch[3]).toString(16).padStart(2, "0");
+      let a = "";
+      if (rgbaMatch[4]) {
+        a = Math.round(parseFloat(rgbaMatch[4]) * 255)
+          .toString(16)
+          .padStart(2, "0");
+      }
+      return `0x${r}${g}${b}${a}`;
+    }
+    if (color.startsWith("#")) {
+      return `0x${color.slice(1)}`;
+    }
+    return color;
+  };
+
+  const safeColor = formatColorForFFmpeg(timerTextColor);
+
+  // Build drawtext filters
   const timerExpr = `%{eif\\:trunc((${durationSeconds}-t)/60)\\:d\\:2}\\:%{eif\\:mod(${durationSeconds}-t\\,60)\\:d\\:2}`;
 
-  if (timerStyle === "cozy") {
-    // Grouped label and timer with a simple dark translucent box
-    drawtextFilter = `drawtext=text='${label}':x=w-tw-50:y=50:fontsize=36:fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=15,drawtext=text='${timerExpr}':x=w-tw-50:y=110:fontsize=64:fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=15`;
-  } else {
-    // Minimal: clean text, no box
-    drawtextFilter = `drawtext=text='${label}':x=w-tw-50:y=50:fontsize=36:fontcolor=white,drawtext=text='${timerExpr}':x=w-tw-50:y=110:fontsize=64:fontcolor=white`;
-  }
+  // Pixel-perfect match for cozy design: centered in left half, warm brown colors, no box
+  const fontItalic = path.join(
+    __dirname,
+    "../assets/fonts/CormorantGaramond-Italic.ttf",
+  );
+  const drawtextFilter = `drawtext=text='${label}':fontfile='${fontItalic}':x=(w/2-tw)/2:y=(h-th)/2-120:fontsize=56:fontcolor=${safeColor},drawtext=text='${timerExpr}':x=(w/2-tw)/2:y=(h-th)/2+40:fontsize=180:fontcolor=${safeColor}`;
 
   // Loop the normalized video to the target duration
   const args = [
@@ -165,6 +189,7 @@ async function attachAudioToSegment(
   audioPath,
   outputPath,
   durationSeconds,
+  bellPath = null,
 ) {
   // Fade out needs to start `durationSeconds - 1`
   const fadeOutStart = Math.max(0, durationSeconds - 1);
@@ -176,23 +201,35 @@ async function attachAudioToSegment(
     "-1",
     "-i",
     audioPath,
-    "-t",
-    String(durationSeconds),
     "-c:v",
     "copy",
     "-c:a",
     "aac",
     "-b:a",
     "192k",
-    "-af",
-    `afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1`,
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-t",
+    String(durationSeconds),
     "-map",
     "0:v:0",
-    "-map",
-    "1:a:0",
     "-shortest",
-    outputPath,
   ];
+  if (bellPath) {
+    args.splice(7, 0, "-i", bellPath);
+    // Keep music's exact duration; mix one bell at the segment start and limit peaks.
+    args.push(
+      "-filter_complex",
+      `[1:a]aresample=48000,aformat=channel_layouts=stereo,afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1[music];[2:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.35[bell];[music][bell]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[a]`,
+      "-map",
+      "[a]",
+    );
+  } else {
+    args.push("-af", `aresample=48000,aformat=channel_layouts=stereo,afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1`, "-map", "1:a:0");
+  }
+  args.push(outputPath);
   await runCommand("ffmpeg", args);
   return outputPath;
 }

@@ -4,6 +4,8 @@ const ffmpeg = require("./ffmpegService");
 const projectsRepo = require("../db/projectsRepo");
 const assetsRepo = require("../db/assetsRepo");
 const jobsRepo = require("../db/jobsRepo");
+const sessionAudioRepo = require('../db/sessionAudioRepo');
+const { resolveAudioPlan } = require('./audioPlanService');
 
 async function executeRender(jobId) {
   const job = jobsRepo.getJobById(jobId);
@@ -30,11 +32,22 @@ async function executeRender(jobId) {
     const assets = assetsRepo.getAssetsByProjectId(projectId);
     const focusAsset = assets.find((a) => a.type === "focus_video");
     const breakAsset = assets.find((a) => a.type === "break_video");
-    const audioAsset = assets.find((a) => a.type === "audio");
-    const breakAudioAsset = assets.find((a) => a.type === "break_audio");
+    if (!focusAsset || !breakAsset) {
+      throw new Error("Missing required video assets.");
+    }
 
-    if (!focusAsset || !breakAsset || !audioAsset) {
-      throw new Error("Missing required assets (focus, break, or audio)");
+    const isPreview = job.type === "preview";
+    jobsRepo.updateJobStatus(jobId, "rendering", 10, "Resolving session audio mappings");
+    const audioPlan = resolveAudioPlan(project, assets, sessionAudioRepo.getSessionAudio(projectId), { preview: isPreview });
+    const bell = project.session_bell_asset_id ? assets.find((asset) => asset.id === project.session_bell_asset_id) : null;
+    if (project.session_bell_asset_id && (!bell || bell.project_id !== projectId || !bell.file_path || !fs.existsSync(bell.file_path))) {
+      const error = new Error('Session bell is missing from local storage.'); error.code = 'BELL_ASSET_NOT_FOUND'; throw error;
+    }
+    for (const segment of audioPlan) {
+      if (!fs.existsSync(segment.audioPath)) {
+        const error = new Error(`${segment.type === 'focus' ? 'Focus' : 'Break'} audio for Session ${segment.sessionIndex} is missing from local storage.`);
+        error.code = 'AUDIO_ASSET_NOT_FOUND'; throw error;
+      }
     }
 
     // Step 2: Normalize
@@ -47,90 +60,25 @@ async function executeRender(jobId) {
 
     // Step 3: Render Segments
     jobsRepo.updateJobStatus(jobId, "rendering", 40, "Rendering segments");
-    const isPreview = job.type === "preview";
-    const focusDurationSecs = isPreview
-      ? 15
-      : (project.focus_duration_minutes || 25) * 60;
-    const breakDurationSecs = isPreview
-      ? 15
-      : (project.break_duration_minutes || 5) * 60;
-    const sessionCount = isPreview ? 1 : project.session_count || 4;
-    const includeFinalBreak = isPreview
-      ? false
-      : project.include_final_break === 1;
-
     const segmentFiles = [];
-
-    // Simple calculation to increment progress
-    const totalSegments = sessionCount * 2 - (includeFinalBreak ? 0 : 1);
     let segmentsDone = 0;
+    const sessionCount = isPreview ? 1 : project.session_count;
 
-    for (let i = 1; i <= sessionCount; i++) {
-      // Focus
-      const focusSegVideoPath = path.join(tempDir, `focus-${i}-video.mp4`);
-      const focusSegPath = path.join(tempDir, `focus-${i}.mp4`);
-
+    for (const segment of audioPlan) {
+      const segmentVideoPath = path.join(tempDir, `${segment.type}-${segment.sessionIndex}-video.mp4`);
+      const segmentPath = path.join(tempDir, `${segment.type}-${segment.sessionIndex}.mp4`);
       await ffmpeg.createSegment(
-        focusNormPath,
-        focusSegVideoPath,
-        focusDurationSecs,
-        `Focus ${i}/${sessionCount}`,
-        true,
-        project.timer_style || "minimal",
+        segment.type === 'focus' ? focusNormPath : breakNormPath,
+        segmentVideoPath,
+        segment.durationSeconds,
+        `${segment.type === 'focus' ? 'Focus' : 'Break'} ${segment.sessionIndex}/${sessionCount}`,
+        segment.type === 'focus',
+        project.timer_text_color || "0x7D6556",
       );
-
-      // Attach audio with fade
-      await ffmpeg.attachAudioToSegment(
-        focusSegVideoPath,
-        audioAsset.file_path,
-        focusSegPath,
-        focusDurationSecs,
-      );
-
-      segmentFiles.push(focusSegPath);
+      await ffmpeg.attachAudioToSegment(segmentVideoPath, segment.audioPath, segmentPath, segment.durationSeconds, bell?.file_path || null);
+      segmentFiles.push(segmentPath);
       segmentsDone++;
-      jobsRepo.updateJobStatus(
-        jobId,
-        "rendering",
-        40 + Math.floor((segmentsDone / totalSegments) * 45),
-        `Rendered focus ${i}`,
-      );
-
-      // Break
-      if (i < sessionCount || includeFinalBreak) {
-        const breakSegVideoPath = path.join(tempDir, `break-${i}-video.mp4`);
-        const breakSegPath = path.join(tempDir, `break-${i}.mp4`);
-
-        await ffmpeg.createSegment(
-          breakNormPath,
-          breakSegVideoPath,
-          breakDurationSecs,
-          `Break ${i}/${sessionCount}`,
-          false,
-          project.timer_style || "minimal",
-        );
-
-        const audioToUse = breakAudioAsset
-          ? breakAudioAsset.file_path
-          : audioAsset.file_path;
-
-        // Attach audio with fade
-        await ffmpeg.attachAudioToSegment(
-          breakSegVideoPath,
-          audioToUse,
-          breakSegPath,
-          breakDurationSecs,
-        );
-
-        segmentFiles.push(breakSegPath);
-        segmentsDone++;
-        jobsRepo.updateJobStatus(
-          jobId,
-          "rendering",
-          40 + Math.floor((segmentsDone / totalSegments) * 45),
-          `Rendered break ${i}`,
-        );
-      }
+      jobsRepo.updateJobStatus(jobId, "rendering", 40 + Math.floor((segmentsDone / audioPlan.length) * 45), `Rendered ${segment.type} ${segment.sessionIndex}`);
     }
 
     // Step 6: Concatenate
@@ -145,7 +93,7 @@ async function executeRender(jobId) {
       ? `preview-${Date.now()}.mp4`
       : `final-${Date.now()}.mp4`;
     const finalPath = path.join(outDir, finalFilename);
-    const targetDuration = isPreview ? 30 : project.total_duration_seconds;
+    const targetDuration = audioPlan.reduce((total, segment) => total + segment.durationSeconds, 0);
 
     await ffmpeg.concatSegments(listPath, finalPath);
 
@@ -176,10 +124,11 @@ async function executeRender(jobId) {
     }
   } catch (error) {
     console.error("Render job failed:", error);
-    jobsRepo.setJobFailed(jobId, error.message);
+    const message = error.code || !error.message.includes('Command failed') ? error.message : 'Render failed. Check the server logs.';
+    jobsRepo.setJobFailed(jobId, message);
     projectsRepo.updateProject(projectId, {
       status: "failed",
-      error_message: error.message,
+      error_message: message,
     });
   }
 }

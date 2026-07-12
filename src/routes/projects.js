@@ -8,6 +8,7 @@ const assetsRepo = require("../db/assetsRepo");
 const uploadJobsRepo = require("../db/uploadJobsRepo");
 const ffmpeg = require("../services/ffmpegService");
 const youtubeService = require("../services/youtubeService");
+const sessionAudioRepo = require("../db/sessionAudioRepo");
 
 const router = express.Router();
 
@@ -19,7 +20,10 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename: function (req, file, cb) {
-    cb(null, `${Date.now()}-${file.originalname}`);
+    cb(
+      null,
+      `${uuidv4()}-${path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, "_")}`,
+    );
   },
 });
 const upload = multer({ storage: storage });
@@ -29,8 +33,19 @@ router.get("/", (req, res) => {
 });
 
 router.post("/", (req, res) => {
-  const project = projectsRepo.createProject(req.body);
-  res.status(201).json(project);
+  try {
+    const project = projectsRepo.createProject(req.body);
+    res.status(201).json(project);
+  } catch (error) {
+    res
+      .status(400)
+      .json({
+        error: {
+          code: error.code || "INVALID_PROJECT_CONFIG",
+          message: error.message,
+        },
+      });
+  }
 });
 
 router.get("/:id", (req, res) => {
@@ -41,9 +56,129 @@ router.get("/:id", (req, res) => {
 });
 
 router.patch("/:id", (req, res) => {
-  const project = projectsRepo.updateProject(req.params.id, req.body);
-  if (!project) return res.status(404).json({ error: "Project not found" });
-  res.json(project);
+  try {
+    const existing = projectsRepo.getProjectById(req.params.id);
+    if (!existing)
+      return res
+        .status(404)
+        .json({
+          error: { code: "PROJECT_NOT_FOUND", message: "Project not found" },
+        });
+    const configKeys = [
+      "pomodoroPreset",
+      "focusDurationMinutes",
+      "breakDurationMinutes",
+      "sessionCount",
+      "includeFinalBreak",
+    ];
+    const updates = {};
+    if (configKeys.some((key) => req.body[key] !== undefined)) {
+      const config = projectsRepo.normalizeProjectConfig({
+        pomodoroPreset: req.body.pomodoroPreset ?? existing.pomodoro_preset,
+        focusDurationMinutes:
+          req.body.focusDurationMinutes ?? existing.focus_duration_minutes,
+        breakDurationMinutes:
+          req.body.breakDurationMinutes ?? existing.break_duration_minutes,
+        sessionCount: req.body.sessionCount ?? existing.session_count,
+        includeFinalBreak:
+          req.body.includeFinalBreak ?? existing.include_final_break,
+      });
+      Object.assign(updates, {
+        pomodoro_preset: config.pomodoroPreset,
+        focus_duration_minutes: config.focusDurationMinutes,
+        break_duration_minutes: config.breakDurationMinutes,
+        session_count: config.sessionCount,
+        include_final_break: config.includeFinalBreak ? 1 : 0,
+        total_duration_seconds: config.totalDurationSeconds,
+      });
+    }
+    if (req.body.title !== undefined) updates.title = req.body.title;
+    if (req.body.description !== undefined)
+      updates.description = req.body.description;
+    if (req.body.timerTextColor !== undefined)
+      updates.timer_text_color = req.body.timerTextColor;
+    if (req.body.outputResolution !== undefined)
+      updates.output_resolution = req.body.outputResolution;
+    if (req.body.sessionBellAssetId !== undefined) {
+      sessionAudioRepo.validateAudioAsset(
+        existing.id,
+        req.body.sessionBellAssetId,
+        "BELL_ASSET_NOT_FOUND",
+      );
+      updates.session_bell_asset_id = req.body.sessionBellAssetId || null;
+    }
+    res.json(projectsRepo.updateProject(req.params.id, updates));
+  } catch (error) {
+    res
+      .status(400)
+      .json({
+        error: {
+          code: error.code || "INVALID_PROJECT_CONFIG",
+          message: error.message,
+        },
+      });
+  }
+});
+
+router.get("/:id/session-audio", (req, res) => {
+  const project = projectsRepo.getProjectById(req.params.id);
+  if (!project)
+    return res
+      .status(404)
+      .json({
+        error: { code: "PROJECT_NOT_FOUND", message: "Project not found" },
+      });
+  res.json({
+    projectId: project.id,
+    sessionCount: project.session_count,
+    bellAssetId: project.session_bell_asset_id || null,
+    sessions: sessionAudioRepo.getSessionAudio(project.id).map((row) => ({
+      sessionIndex: row.session_index,
+      focusAudioAssetId: row.focus_audio_asset_id,
+      breakAudioAssetId: row.break_audio_asset_id,
+    })),
+  });
+});
+
+router.put("/:id/session-audio", (req, res) => {
+  try {
+    const project = projectsRepo.getProjectById(req.params.id);
+    if (!project)
+      return res
+        .status(404)
+        .json({
+          error: { code: "PROJECT_NOT_FOUND", message: "Project not found" },
+        });
+    const rows = sessionAudioRepo.replaceSessionAudio(project, req.body || {});
+    const saved = projectsRepo.getProjectById(project.id);
+    res.json({
+      projectId: project.id,
+      sessionCount: project.session_count,
+      bellAssetId: saved.session_bell_asset_id || null,
+      sessions: rows.map((row) => ({
+        sessionIndex: row.session_index,
+        focusAudioAssetId: row.focus_audio_asset_id,
+        breakAudioAssetId: row.break_audio_asset_id,
+      })),
+    });
+  } catch (error) {
+    res
+      .status(
+        error.code &&
+          [
+            "AUDIO_ASSET_PROJECT_MISMATCH",
+            "BELL_ASSET_PROJECT_MISMATCH",
+          ].includes(error.code)
+          ? 403
+          : 400,
+      )
+      .json({
+        error: {
+          code: error.code || "INVALID_SESSION_AUDIO",
+          message: error.message,
+        },
+      });
+  }
 });
 
 router.delete("/:id", (req, res) => {
@@ -89,9 +224,13 @@ router.delete("/:id", (req, res) => {
 router.post("/:id/assets", upload.single("file"), async (req, res) => {
   const { id } = req.params;
   const project = projectsRepo.getProjectById(id);
-  if (!project) {
-    fs.unlinkSync(req.file.path);
-    return res.status(404).json({ error: "Project not found" });
+  if (!project || !req.file) {
+    if (req.file?.path) fs.unlinkSync(req.file.path);
+    return res
+      .status(404)
+      .json({
+        error: { code: "PROJECT_NOT_FOUND", message: "Project not found" },
+      });
   }
 
   const { type } = req.body;
@@ -101,11 +240,39 @@ router.post("/:id/assets", upload.single("file"), async (req, res) => {
       "break_video",
       "audio",
       "break_audio",
+      "audio_track",
+      "session_bell",
       "thumbnail",
     ].includes(type)
   ) {
     fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: "Invalid asset type" });
+    return res
+      .status(400)
+      .json({
+        error: { code: "INVALID_ASSET_TYPE", message: "Invalid asset type" },
+      });
+  }
+  const audioType = [
+    "audio",
+    "break_audio",
+    "audio_track",
+    "session_bell",
+  ].includes(type);
+  if (
+    (audioType && !req.file.mimetype.startsWith("audio/")) ||
+    (!audioType &&
+      ["focus_video", "break_video"].includes(type) &&
+      !req.file.mimetype.startsWith("video/"))
+  ) {
+    fs.unlinkSync(req.file.path);
+    return res
+      .status(400)
+      .json({
+        error: {
+          code: "INVALID_MEDIA_TYPE",
+          message: "Uploaded file type does not match the selected asset type.",
+        },
+      });
   }
 
   let durationSeconds = null;
@@ -143,6 +310,44 @@ router.post("/:id/assets", upload.single("file"), async (req, res) => {
   res.status(201).json(asset);
 });
 
+router.delete("/:id/assets/:assetId", (req, res) => {
+  const asset = assetsRepo.getAssetById(req.params.assetId);
+  if (!asset || asset.project_id !== req.params.id)
+    return res
+      .status(404)
+      .json({ error: { code: "ASSET_NOT_FOUND", message: "Asset not found" } });
+  const usage = sessionAudioRepo.getAssetUsage(asset.id);
+  if (
+    Number(usage.mapping_count || 0) > 0 ||
+    Number(usage.bell_count || 0) > 0
+  ) {
+    return res
+      .status(409)
+      .json({
+        error: {
+          code: "ASSET_IN_USE",
+          message:
+            "This audio asset is currently used by one or more session mappings.",
+        },
+      });
+  }
+  try {
+    if (asset.file_path && fs.existsSync(asset.file_path))
+      fs.unlinkSync(asset.file_path);
+    assetsRepo.deleteAsset(asset.id);
+    res.json({ success: true });
+  } catch (error) {
+    res
+      .status(500)
+      .json({
+        error: {
+          code: "ASSET_DELETE_FAILED",
+          message: "Failed to delete the asset.",
+        },
+      });
+  }
+});
+
 router.post("/:id/duplicate", (req, res) => {
   const project = projectsRepo.duplicateProject(req.params.id);
   if (!project) return res.status(404).json({ error: "Project not found" });
@@ -157,7 +362,11 @@ router.post("/:id/youtube/upload", (req, res) => {
   if (project.status !== "completed")
     return res.status(400).json({ error: "Project render not completed" });
 
-  const absoluteOutputPath = path.resolve(__dirname, '../../../data', project.output_path.replace(/^\//, ''));
+  const absoluteOutputPath = path.resolve(
+    __dirname,
+    "../../../data",
+    project.output_path.replace(/^\//, ""),
+  );
   if (!fs.existsSync(absoluteOutputPath))
     return res.status(400).json({ error: "Output video missing" });
 

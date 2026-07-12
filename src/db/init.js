@@ -9,9 +9,9 @@ function initDb() {
       focus_duration_minutes INTEGER,
       break_duration_minutes INTEGER,
       session_count INTEGER,
-      include_final_break INTEGER,
-      timer_style TEXT,
-      output_resolution TEXT,
+      include_final_break BOOLEAN DEFAULT 1,
+      timer_text_color TEXT,
+      output_resolution TEXT DEFAULT '1080p',
       status TEXT,
       total_duration_seconds INTEGER,
       output_path TEXT,
@@ -89,19 +89,30 @@ function initDb() {
     );
   `);
 
+  const columns = new Set(db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
+  for (const [name, definition] of Object.entries({
+    output_size_bytes: 'INTEGER',
+    rendered_duration_seconds: 'INTEGER',
+    pomodoro_preset: "TEXT NOT NULL DEFAULT 'custom'",
+    session_bell_asset_id: 'TEXT',
+  })) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${definition}`);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_session_audio (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      session_index INTEGER NOT NULL,
+      focus_audio_asset_id TEXT,
+      break_audio_asset_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(project_id, session_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_session_audio_project_id ON project_session_audio(project_id);
+  `);
   console.log('Database initialized successfully.');
-
-  try {
-    db.exec(`ALTER TABLE projects ADD COLUMN output_size_bytes INTEGER;`);
-  } catch (err) {
-    // Column might already exist, ignore
-  }
-
-  try {
-    db.exec(`ALTER TABLE projects ADD COLUMN rendered_duration_seconds INTEGER;`);
-  } catch (err) {
-    // Column might already exist, ignore
-  }
 }
 
 if (require.main === module) {
