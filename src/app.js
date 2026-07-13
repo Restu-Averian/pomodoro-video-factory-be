@@ -18,5 +18,6 @@ app.use('/api/projects', require('./routes/projects'));
 app.use('/api', require('./routes/render'));
 app.use('/api/youtube', require('./routes/youtube'));
 app.use('/api/upload-jobs', require('./routes/uploadJobs'));
+app.use('/api/reformat-video', require('./routes/videoReformatter'));
 
 module.exports = app;

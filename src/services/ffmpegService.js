@@ -227,9 +227,99 @@ async function attachAudioToSegment(
       "[a]",
     );
   } else {
-    args.push("-af", `aresample=48000,aformat=channel_layouts=stereo,afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1`, "-map", "1:a:0");
+    args.push(
+      "-af",
+      `aresample=48000,aformat=channel_layouts=stereo,afade=t=in:st=0:d=1,afade=t=out:st=${fadeOutStart}:d=1`,
+      "-map",
+      "1:a:0",
+    );
   }
   args.push(outputPath);
+  await runCommand("ffmpeg", args);
+  return outputPath;
+}
+
+async function reformatVideo(
+  inputPath,
+  outputPath,
+  { zoom = 1.0, x = 0, y = 0, topBar = 0, bottomBar = 0 },
+) {
+  const metadata = await probeMedia(inputPath);
+  const videoStream = metadata.streams.find((s) => s.codec_type === "video");
+  const hasAudio = metadata.streams.some((s) => s.codec_type === "audio");
+
+  if (!videoStream) {
+    throw new Error("No video stream found in the input file.");
+  }
+
+  const win = parseInt(videoStream.width);
+  const hin = parseInt(videoStream.height);
+
+  // Calculate base scale to fit 1920x1080 (contain)
+  const scale = Math.min(1920 / win, 1080 / hin);
+
+  // Calculate scaled dimensions based on zoom
+  const ws = Math.round((win * scale * zoom) / 2) * 2; // ensure even
+  const hs = Math.round((hin * scale * zoom) / 2) * 2; // ensure even
+
+  // Calculate top-left absolute position
+  const px = Math.round((1920 - ws) / 2 + x);
+  const py = Math.round((1080 - hs) / 2 + y);
+
+  // Build filter complex
+  let drawboxes = [];
+  if (topBar > 0) {
+    drawboxes.push(`drawbox=x=0:y=0:w=1920:h=${topBar}:color=black:t=fill`);
+  }
+  if (bottomBar > 0) {
+    drawboxes.push(`drawbox=x=0:y=1080-${bottomBar}:w=1920:h=${bottomBar}:color=black:t=fill`);
+  }
+
+  const filterComplexArr = [
+    `[0:v]scale=${ws}:${hs}:force_original_aspect_ratio=disable[vscaled]`,
+    `color=c=black:s=1920x1080[bg]`,
+    `[bg][vscaled]overlay=x=${px}:y=${py}:shortest=1${drawboxes.length > 0 ? '[vover]' : '[vout]'}`,
+  ];
+
+  if (drawboxes.length > 0) {
+    filterComplexArr.push(`[vover]${drawboxes.join(',')}[vout]`);
+  }
+  
+  const filterComplex = filterComplexArr.join(';');
+
+  const args = [
+    "-y",
+    "-i",
+    inputPath,
+    "-filter_complex",
+    filterComplex,
+    "-map",
+    "[vout]",
+  ];
+
+  if (hasAudio) {
+    args.push("-map", "0:a:0");
+  }
+
+  args.push(
+    "-c:v",
+    "libx264",
+    "-preset",
+    "fast",
+    "-crf",
+    "23",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+  );
+
+  if (hasAudio) {
+    args.push("-c:a", "aac", "-b:a", "192k");
+  }
+
+  args.push(outputPath);
+
   await runCommand("ffmpeg", args);
   return outputPath;
 }
@@ -241,4 +331,5 @@ module.exports = {
   concatSegments,
   attachAudio,
   attachAudioToSegment,
+  reformatVideo,
 };
