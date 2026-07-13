@@ -16,6 +16,7 @@ app.use('/outputs', express.static(path.join(__dirname, '../../data/outputs')));
 app.use('/api', healthRoutes);
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api', require('./routes/render'));
+app.use('/api', require('./routes/renderWorker'));
 app.use('/api/youtube', require('./routes/youtube'));
 app.use('/api/upload-jobs', require('./routes/uploadJobs'));
 app.use('/api/reformat-video', require('./routes/videoReformatter'));
