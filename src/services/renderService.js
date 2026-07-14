@@ -1,11 +1,12 @@
 const fs = require("fs");
 const path = require("path");
-const { executeRenderPipeline } = require("../../../shared/renderPipeline");
 const projectsRepo = require("../db/projectsRepo");
 const assetsRepo = require("../db/assetsRepo");
 const jobsRepo = require("../db/jobsRepo");
-const sessionAudioRepo = require('../db/sessionAudioRepo');
-const { resolveAudioPlan } = require('./audioPlanService');
+const sessionAudioRepo = require("../db/sessionAudioRepo");
+const { resolveAudioPlan } = require("./audioPlanService");
+const { submitRemoteRenderJob } = require("./remoteWorkerClient");
+const { executeRenderPipeline } = require("../shared/renderPipeline");
 
 async function executeRender(jobId) {
   const job = jobsRepo.getJobById(jobId);
@@ -31,27 +32,84 @@ async function executeRender(jobId) {
     }
 
     const isPreview = job.type === "preview";
-    jobsRepo.updateJobStatus(jobId, "rendering", 10, "Resolving session audio mappings");
-    const audioPlan = resolveAudioPlan(project, assets, sessionAudioRepo.getSessionAudio(projectId), { preview: isPreview });
-    const bell = project.session_bell_asset_id ? assets.find((asset) => asset.id === project.session_bell_asset_id) : null;
+    jobsRepo.updateJobStatus(
+      jobId,
+      "rendering",
+      10,
+      "Resolving session audio mappings",
+    );
+    const audioPlan = resolveAudioPlan(
+      project,
+      assets,
+      sessionAudioRepo.getSessionAudio(projectId),
+      { preview: isPreview },
+    );
+    const bell = project.session_bell_asset_id
+      ? assets.find((asset) => asset.id === project.session_bell_asset_id)
+      : null;
 
-    if (project.session_bell_asset_id && (!bell || bell.project_id !== projectId || !bell.file_path || !fs.existsSync(bell.file_path))) {
-      const error = new Error('Session bell is missing from local storage.'); error.code = 'BELL_ASSET_NOT_FOUND'; throw error;
+    if (
+      project.session_bell_asset_id &&
+      (!bell ||
+        bell.project_id !== projectId ||
+        !bell.file_path ||
+        !fs.existsSync(bell.file_path))
+    ) {
+      const error = new Error("Session bell is missing from local storage.");
+      error.code = "BELL_ASSET_NOT_FOUND";
+      throw error;
     }
     for (const segment of audioPlan) {
       if (!fs.existsSync(segment.audioPath)) {
-        const error = new Error(`${segment.type === 'focus' ? 'Focus' : 'Break'} audio for Session ${segment.sessionIndex} is missing from local storage.`);
-        error.code = 'AUDIO_ASSET_NOT_FOUND'; throw error;
+        const error = new Error(
+          `${segment.type === "focus" ? "Focus" : "Break"} audio for Session ${segment.sessionIndex} is missing from local storage.`,
+        );
+        error.code = "AUDIO_ASSET_NOT_FOUND";
+        throw error;
       }
     }
 
-    const targetDuration = audioPlan.reduce((total, segment) => total + segment.durationSeconds, 0);
-    const finalFilename = isPreview ? `preview-${Date.now()}.mp4` : `final-${Date.now()}.mp4`;
+    const targetDuration = audioPlan.reduce(
+      (total, segment) => total + segment.durationSeconds,
+      0,
+    );
+    const finalFilename = isPreview
+      ? `preview-${Date.now()}.mp4`
+      : `final-${Date.now()}.mp4`;
 
-    await runLocalRender(jobId, projectId, project, isPreview, focusAsset, breakAsset, bell, audioPlan, targetDuration, finalFilename);
+    if (process.env.RENDER_MODE === "remote") {
+      await runRemoteRender(
+        jobId,
+        projectId,
+        project,
+        isPreview,
+        focusAsset,
+        breakAsset,
+        bell,
+        audioPlan,
+        targetDuration,
+        finalFilename,
+      );
+    } else {
+      await runLocalRender(
+        jobId,
+        projectId,
+        project,
+        isPreview,
+        focusAsset,
+        breakAsset,
+        bell,
+        audioPlan,
+        targetDuration,
+        finalFilename,
+      );
+    }
   } catch (error) {
     console.error("Render job failed:", error);
-    const message = error.code || !error.message.includes('Command failed') ? error.message : 'Render failed. Check the server logs.';
+    const message =
+      error.code || !error.message.includes("Command failed")
+        ? error.message
+        : "Render failed. Check the server logs.";
     jobsRepo.setJobFailed(jobId, message);
     projectsRepo.updateProject(projectId, {
       status: "failed",
@@ -60,7 +118,136 @@ async function executeRender(jobId) {
   }
 }
 
-async function runLocalRender(jobId, projectId, project, isPreview, focusAsset, breakAsset, bell, audioPlan, targetDuration, finalFilename) {
+function assertLocalFile(filePath, label) {
+  if (!filePath || !fs.existsSync(filePath))
+    throw new Error(`${label} is missing from local storage.`);
+}
+
+function extension(filePath, fallback) {
+  return path.extname(filePath) || fallback;
+}
+
+function buildRemoteSubmission({
+  project,
+  isPreview,
+  focusAsset,
+  breakAsset,
+  bell,
+  audioPlan,
+  finalFilename,
+}) {
+  const files = [];
+  const byLocalPath = new Map();
+  function addFile(logicalPath, filePath, label) {
+    assertLocalFile(filePath, label);
+    if (!byLocalPath.has(filePath)) {
+      byLocalPath.set(filePath, logicalPath);
+      files.push({ logicalPath, path: filePath });
+    }
+    return byLocalPath.get(filePath);
+  }
+
+  const remoteAudioPlan = audioPlan.map((segment, index) => ({
+    type: segment.type,
+    sessionIndex: segment.sessionIndex,
+    durationSeconds: segment.durationSeconds,
+    audioPath: addFile(
+      `assets/audio-${index + 1}${extension(segment.audioPath, ".mp3")}`,
+      segment.audioPath,
+      `${segment.type} audio for Session ${segment.sessionIndex}`,
+    ),
+  }));
+  const fontPath = path.resolve(
+    __dirname,
+    "../assets/fonts/CormorantGaramond-Italic.ttf",
+  );
+
+  const manifest = {
+    version: 1,
+    config: {
+      projectId: project.id,
+      type: isPreview ? "preview" : "final",
+      isPreview,
+      sessionCount: project.session_count,
+      timerTextColor: project.timer_text_color,
+      finalFilename,
+    },
+    assets: {
+      focusVideo: addFile(
+        `assets/focus-video${extension(focusAsset.file_path, ".mp4")}`,
+        focusAsset.file_path,
+        "Focus video",
+      ),
+      breakVideo: addFile(
+        `assets/break-video${extension(breakAsset.file_path, ".mp4")}`,
+        breakAsset.file_path,
+        "Break video",
+      ),
+      fontItalic: addFile(
+        "assets/CormorantGaramond-Italic.ttf",
+        fontPath,
+        "Italic font",
+      ),
+      audioPlan: remoteAudioPlan,
+    },
+  };
+  if (bell)
+    manifest.assets.sessionBell = addFile(
+      `assets/session-bell${extension(bell.file_path, ".mp3")}`,
+      bell.file_path,
+      "Session bell",
+    );
+  return { manifest, files };
+}
+
+async function runRemoteRender(
+  jobId,
+  projectId,
+  project,
+  isPreview,
+  focusAsset,
+  breakAsset,
+  bell,
+  audioPlan,
+  targetDuration,
+  finalFilename,
+) {
+  jobsRepo.updateJobStatus(jobId, "queued", 1, "Uploading Sources");
+  const submission = buildRemoteSubmission({
+    project,
+    isPreview,
+    focusAsset,
+    breakAsset,
+    bell,
+    audioPlan,
+    finalFilename,
+  });
+  const remoteJob = await submitRemoteRenderJob(submission);
+  jobsRepo.updateJobStatus(
+    jobId,
+    "queued",
+    5,
+    "Queued on remote worker",
+    `remote:${remoteJob.id}`,
+  );
+  projectsRepo.updateProject(projectId, {
+    status: "queued",
+    rendered_duration_seconds: targetDuration,
+  });
+}
+
+async function runLocalRender(
+  jobId,
+  projectId,
+  project,
+  isPreview,
+  focusAsset,
+  breakAsset,
+  bell,
+  audioPlan,
+  targetDuration,
+  finalFilename,
+) {
   const tempDir = path.resolve(__dirname, `../../../data/temp/${projectId}`);
   const outDir = path.resolve(__dirname, `../../../data/outputs/${projectId}`);
 
@@ -72,11 +259,14 @@ async function runLocalRender(jobId, projectId, project, isPreview, focusAsset, 
     sessionCount: project.session_count,
     audioPlan,
     bellPath: bell ? bell.file_path : null,
-    fontItalicPath: path.resolve(__dirname, '../assets/fonts/CormorantGaramond-Italic.ttf'),
+    fontItalicPath: path.resolve(
+      __dirname,
+      "../assets/fonts/CormorantGaramond-Italic.ttf",
+    ),
     tempDir,
     outDir,
     finalFilename,
-    keepTempFiles: process.env.KEEP_TEMP_FILES === 'true'
+    keepTempFiles: process.env.KEEP_TEMP_FILES === "true",
   };
 
   const onProgress = (percentage, step) => {
@@ -104,4 +294,5 @@ async function runLocalRender(jobId, projectId, project, isPreview, focusAsset, 
 
 module.exports = {
   executeRender,
+  buildRemoteSubmission,
 };
