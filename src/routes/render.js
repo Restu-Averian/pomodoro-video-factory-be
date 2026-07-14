@@ -6,11 +6,18 @@ const renderService = require("../services/renderService");
 const { getRemoteRenderJob } = require("../services/remoteWorkerClient");
 
 const router = express.Router();
-const remoteMarker = (job) => job?.output_path?.startsWith("remote:") ? job.output_path.slice("remote:".length) : null;
+const remoteMarker = (job) =>
+  job?.output_path?.startsWith("remote:")
+    ? job.output_path.slice("remote:".length)
+    : null;
 
 function startRenderJob(job) {
   if (process.env.RENDER_MODE === "remote") {
-    renderService.executeRender(job.id).catch((error) => console.error("Remote render submission failed:", error));
+    renderService
+      .executeRender(job.id)
+      .catch((error) =>
+        console.error("Remote render submission failed:", error),
+      );
   } else {
     renderQueue.addJob(job.id);
   }
@@ -24,9 +31,14 @@ router.post("/projects/:id/render/preview", (req, res) => {
   const job = jobsRepo.createJob({ projectId: id, type: "preview" });
   startRenderJob(job);
 
-  projectsRepo.updateProject(id, { status: "queued" });
+  projectsRepo.updateProject(id, { status: "queued", error_message: null });
 
-  res.json({ jobId: job.id, status: "queued", currentStep: process.env.RENDER_MODE === "remote" ? "Uploading Sources" : "Queued" });
+  res.json({
+    jobId: job.id,
+    status: "queued",
+    currentStep:
+      process.env.RENDER_MODE === "remote" ? "Uploading Sources" : "Queued",
+  });
 });
 
 router.post("/projects/:id/render/final", (req, res) => {
@@ -37,9 +49,14 @@ router.post("/projects/:id/render/final", (req, res) => {
   const job = jobsRepo.createJob({ projectId: id, type: "final" });
   startRenderJob(job);
 
-  projectsRepo.updateProject(id, { status: "queued" });
+  projectsRepo.updateProject(id, { status: "queued", error_message: null });
 
-  res.json({ jobId: job.id, status: "queued", currentStep: process.env.RENDER_MODE === "remote" ? "Uploading Sources" : "Queued" });
+  res.json({
+    jobId: job.id,
+    status: "queued",
+    currentStep:
+      process.env.RENDER_MODE === "remote" ? "Uploading Sources" : "Queued",
+  });
 });
 
 router.get("/render-jobs/:id", async (req, res) => {
@@ -51,14 +68,34 @@ router.get("/render-jobs/:id", async (req, res) => {
       const remote = await getRemoteRenderJob({ workerJobId });
       if (remote.status === "completed") {
         jobsRepo.setJobCompleted(job.id, job.output_path);
-        projectsRepo.updateProject(job.project_id, { status: "draft" });
+        projectsRepo.updateProject(job.project_id, {
+          status: job.type === "preview" ? "draft" : "completed",
+          error_message: null,
+        });
       } else if (remote.status === "failed") {
-        jobsRepo.setJobFailed(job.id, remote.errorMessage || remote.currentStep || "Remote render failed");
-        projectsRepo.updateProject(job.project_id, { status: "failed", error_message: remote.errorMessage || "Remote render failed" });
+        jobsRepo.setJobFailed(
+          job.id,
+          remote.errorMessage || remote.currentStep || "Remote render failed",
+        );
+        projectsRepo.updateProject(job.project_id, {
+          status: "failed",
+          error_message: remote.errorMessage || "Remote render failed",
+        });
       } else {
-        jobsRepo.updateJobStatus(job.id, remote.status, remote.progress, remote.currentStep, job.output_path);
+        jobsRepo.updateJobStatus(
+          job.id,
+          remote.status,
+          remote.progress,
+          remote.currentStep,
+          job.output_path,
+        );
       }
-      return res.json({ ...remote, id: job.id, projectId: job.project_id, outputPath: job.output_path });
+      return res.json({
+        ...remote,
+        id: job.id,
+        projectId: job.project_id,
+        outputPath: job.output_path,
+      });
     } catch (error) {
       return res.json({
         id: job.id,

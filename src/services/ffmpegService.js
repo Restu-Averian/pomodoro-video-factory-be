@@ -1,6 +1,7 @@
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const { escapeFfmpegFilterPath } = require("../shared/ffmpegUtils");
 
 function runCommand(command, args) {
   return new Promise((resolve, reject) => {
@@ -113,7 +114,7 @@ async function createSegment(
     __dirname,
     "../assets/fonts/CormorantGaramond-Italic.ttf",
   );
-  const drawtextFilter = `drawtext=text='${label}':fontfile='${fontItalic}':x=(w/2-tw)/2:y=(h-th)/2-120:fontsize=56:fontcolor=${safeColor},drawtext=text='${timerExpr}':x=(w/2-tw)/2:y=(h-th)/2+40:fontsize=180:fontcolor=${safeColor}`;
+  const drawtextFilter = `drawtext=text='${label}':fontfile='${escapeFfmpegFilterPath(fontItalic)}':x=(w/2-tw)/2:y=(h-th)/2-120:fontsize=56:fontcolor=${safeColor},drawtext=text='${timerExpr}':x=(w/2-tw)/2:y=(h-th)/2+40:fontsize=180:fontcolor=${safeColor}`;
 
   // Loop the normalized video to the target duration
   const args = [
@@ -272,20 +273,22 @@ async function reformatVideo(
     drawboxes.push(`drawbox=x=0:y=0:w=1920:h=${topBar}:color=black:t=fill`);
   }
   if (bottomBar > 0) {
-    drawboxes.push(`drawbox=x=0:y=1080-${bottomBar}:w=1920:h=${bottomBar}:color=black:t=fill`);
+    drawboxes.push(
+      `drawbox=x=0:y=1080-${bottomBar}:w=1920:h=${bottomBar}:color=black:t=fill`,
+    );
   }
 
   const filterComplexArr = [
     `[0:v]scale=${ws}:${hs}:force_original_aspect_ratio=disable[vscaled]`,
     `color=c=black:s=1920x1080[bg]`,
-    `[bg][vscaled]overlay=x=${px}:y=${py}:shortest=1${drawboxes.length > 0 ? '[vover]' : '[vout]'}`,
+    `[bg][vscaled]overlay=x=${px}:y=${py}:shortest=1${drawboxes.length > 0 ? "[vover]" : "[vout]"}`,
   ];
 
   if (drawboxes.length > 0) {
-    filterComplexArr.push(`[vover]${drawboxes.join(',')}[vout]`);
+    filterComplexArr.push(`[vover]${drawboxes.join(",")}[vout]`);
   }
-  
-  const filterComplex = filterComplexArr.join(';');
+
+  const filterComplex = filterComplexArr.join(";");
 
   const args = [
     "-y",

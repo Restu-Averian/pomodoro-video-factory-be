@@ -1,6 +1,5 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { Readable } = require("node:stream");
 
 const REQUEST_TIMEOUT_MS = 5000;
 const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -30,17 +29,36 @@ async function requestJson(url, options, fetchImpl) {
   }
 }
 
-function multipartStream({ boundary, manifest, files }) {
-  async function* parts() {
-    yield `--${boundary}\r\nContent-Disposition: form-data; name="manifest"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(manifest)}\r\n`;
-    for (const file of files) {
-      yield `--${boundary}\r\nContent-Disposition: form-data; name="${file.logicalPath}"; filename="${path.basename(file.logicalPath)}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
-      yield* fs.createReadStream(file.path);
-      yield "\r\n";
-    }
-    yield `--${boundary}--\r\n`;
+function requiredLogicalPaths(manifest) {
+  const assets = manifest?.assets;
+  if (!assets) return [];
+  const paths = [assets.focusVideo, assets.breakVideo, assets.fontItalic];
+  if (assets.sessionBell) paths.push(assets.sessionBell);
+  for (const segment of assets.audioPlan || []) paths.push(segment.audioPath);
+  return [...new Set(paths.filter(Boolean))];
+}
+
+function filesInManifestOrder(manifest, files) {
+  const byLogicalPath = new Map(
+    (files || []).map((file) => [file.logicalPath, file]),
+  );
+  const ordered = requiredLogicalPaths(manifest)
+    .map((logicalPath) => byLogicalPath.get(logicalPath))
+    .filter(Boolean);
+  return ordered.length ? ordered : files || [];
+}
+
+async function multipartForm({ manifest, files }) {
+  const form = new FormData();
+  form.append("manifest", JSON.stringify(manifest));
+  for (const file of filesInManifestOrder(manifest, files)) {
+    form.append(
+      "assets",
+      await fs.openAsBlob(file.path),
+      path.basename(file.logicalPath),
+    );
   }
-  return Readable.from(parts());
+  return form;
 }
 
 async function submitRemoteRenderJob({
@@ -62,7 +80,6 @@ async function submitRemoteRenderJob({
       "Remote worker does not support render uploads. Deploy Phase 5.9B worker and restart it.",
     );
   }
-  const boundary = `niititu-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
   try {
@@ -70,10 +87,8 @@ async function submitRemoteRenderJob({
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
-      body: multipartStream({ boundary, manifest, files }),
-      duplex: "half",
+      body: await multipartForm({ manifest, files }),
       signal: controller.signal,
     });
     if (!response.ok)
@@ -89,7 +104,7 @@ async function submitRemoteRenderJob({
         : "network error";
       if (cause === "EPIPE" || cause === "ECONNRESET") {
         throw new Error(
-          `Upload rejected by worker (Check worker logs/token): ${cause}`,
+          `Upload rejected by worker (no response body received; check worker logs/token): ${cause}`,
         );
       }
       throw new Error(`Remote worker offline: ${cause}`);

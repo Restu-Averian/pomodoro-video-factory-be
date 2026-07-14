@@ -46,14 +46,14 @@ function updateJobStatus(
 
 function setJobStarted(id) {
   const stmt = db.prepare(
-    "UPDATE render_jobs SET started_at = CURRENT_TIMESTAMP, status = 'rendering', progress = 0, current_step = 'Starting', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "UPDATE render_jobs SET started_at = CURRENT_TIMESTAMP, status = 'rendering', progress = 0, current_step = 'Starting', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   );
   stmt.run(id);
 }
 
 function setJobCompleted(id, outputPath) {
   const stmt = db.prepare(
-    "UPDATE render_jobs SET completed_at = CURRENT_TIMESTAMP, status = 'completed', progress = 100, current_step = 'Completed', output_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "UPDATE render_jobs SET completed_at = CURRENT_TIMESTAMP, status = 'completed', progress = 100, current_step = 'Completed', output_path = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   );
   stmt.run(outputPath, id);
 }
