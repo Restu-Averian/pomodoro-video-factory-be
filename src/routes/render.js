@@ -4,12 +4,13 @@ const jobsRepo = require("../db/jobsRepo");
 const renderQueue = require("../services/renderQueue");
 const renderService = require("../services/renderService");
 const { getRemoteRenderJob } = require("../services/remoteWorkerClient");
+const {
+  createRemoteDeliveryService,
+  remoteMarker,
+} = require("../services/remoteDeliveryService");
 
 const router = express.Router();
-const remoteMarker = (job) =>
-  job?.output_path?.startsWith("remote:")
-    ? job.output_path.slice("remote:".length)
-    : null;
+const remoteDelivery = createRemoteDeliveryService();
 
 function startRenderJob(job) {
   if (process.env.RENDER_MODE === "remote") {
@@ -67,10 +68,27 @@ router.get("/render-jobs/:id", async (req, res) => {
     try {
       const remote = await getRemoteRenderJob({ workerJobId });
       if (remote.status === "completed") {
-        jobsRepo.setJobCompleted(job.id, job.output_path);
-        projectsRepo.updateProject(job.project_id, {
-          status: job.type === "preview" ? "draft" : "completed",
-          error_message: null,
+        const delivery = await remoteDelivery.deliverCompletedRemoteJob(
+          job,
+          remote,
+        );
+        const deliveredJob = jobsRepo.getJobById(job.id) || job;
+        const deliveredProject = projectsRepo.getProjectById(job.project_id);
+        return res.json({
+          ...remote,
+          id: deliveredJob.id,
+          projectId: deliveredJob.project_id,
+          status:
+            delivery.status === "completed"
+              ? "completed"
+              : deliveredJob.status,
+          progress: deliveredJob.progress,
+          currentStep: deliveredJob.current_step,
+          outputPath: deliveredJob.output_path,
+          errorMessage:
+            deliveredJob.error_message || deliveredProject?.error_message,
+          startedAt: deliveredJob.started_at,
+          completedAt: deliveredJob.completed_at,
         });
       } else if (remote.status === "failed") {
         jobsRepo.setJobFailed(

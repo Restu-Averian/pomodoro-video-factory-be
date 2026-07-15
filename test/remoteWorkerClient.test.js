@@ -7,7 +7,17 @@ const {
   getRemoteWorkerStatus,
   submitRemoteRenderJob,
   getRemoteRenderJob,
+  downloadRemoteJobOutput,
 } = require("../src/services/remoteWorkerClient");
+
+function webStreamFrom(chunks) {
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(Buffer.from(chunk));
+      controller.close();
+    },
+  });
+}
 
 test("returns an offline result instead of throwing when the worker cannot be reached", async () => {
   const result = await getRemoteWorkerStatus({
@@ -123,4 +133,54 @@ test("remote render job status maps worker state for frontend progress", async (
   assert.equal(status.status, "rendering");
   assert.equal(status.progress, 42);
   assert.equal(status.currentStep, "Rendering segments");
+});
+
+test("completed remote output downloads by stream to a part file then renames", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niititu-download-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const finalPath = path.join(dir, "final.mp4");
+  let requestedUrl = null;
+
+  const result = await downloadRemoteJobOutput({
+    url: "http://worker.test/",
+    token: "secret-token",
+    workerJobId: "worker-job",
+    finalPath,
+    fetchImpl: async (url, options) => {
+      requestedUrl = url;
+      assert.equal(options.headers.Authorization, "Bearer secret-token");
+      return new Response(webStreamFrom(["remote-video"]), {
+        status: 200,
+        headers: { "Content-Length": String(Buffer.byteLength("remote-video")) },
+      });
+    },
+  });
+
+  assert.equal(requestedUrl, "http://worker.test/api/jobs/worker-job/output");
+  assert.equal(result.bytesWritten, Buffer.byteLength("remote-video"));
+  assert.equal(fs.readFileSync(finalPath, "utf8"), "remote-video");
+  assert.equal(fs.existsSync(`${finalPath}.part`), false);
+});
+
+test("failed remote output download removes partial file and is retryable", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niititu-download-fail-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const finalPath = path.join(dir, "final.mp4");
+
+  await assert.rejects(
+    downloadRemoteJobOutput({
+      url: "http://worker.test",
+      token: "secret-token",
+      workerJobId: "worker-job",
+      finalPath,
+      fetchImpl: async () => new Response(webStreamFrom(["short"]), {
+        status: 200,
+        headers: { "Content-Length": "99" },
+      }),
+    }),
+    /Downloaded size mismatch/,
+  );
+
+  assert.equal(fs.existsSync(finalPath), false);
+  assert.equal(fs.existsSync(`${finalPath}.part`), false);
 });
